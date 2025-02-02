@@ -50,36 +50,72 @@ namespace OmahaPokerServer
             return null;
         }
 */
-
-        public async Task<int> SavePlayer(string nickname, string password,CancellationToken cancellationToken)
+        public async Task<(int playerId, int wallet)> GetPlayerByNickname(string nickname, CancellationToken cancellationToken)
         {
             await _dbConnection.OpenAsync(cancellationToken);
             try
             {
-                if (nickname != null && password!=null)
+                if (nickname != null)
                 {
-                    const string sqlQuery = "INSERT INTO players (nickname, password) VALUES (@nickname, @password) returning player_id";
+                    const string sqlQuery = "SELECT player_id, wallet FROM players WHERE nickname = @nickname";
                     var cmd = new NpgsqlCommand(sqlQuery, _dbConnection);
                     cmd.Parameters.AddWithValue("nickname", nickname);
-                    cmd.Parameters.AddWithValue("password", password);
                     var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
                     if (reader.HasRows && await reader.ReadAsync(cancellationToken))
                     {
-                        return reader.GetInt32(0);
+                        int playerId = reader.GetInt32(0);   // Получаем player_id
+                        int wallet = reader.GetInt32(1);     // Получаем wallet
+
+                        return (playerId, wallet);
                     }
                 }
             }
             catch (Exception ex)
             {
-
                 Console.WriteLine(ex.Message);
             }
             finally
             {
                 await _dbConnection.CloseAsync();
             }
-            return 0;
+
+            // Возвращаем значения по умолчанию, если запись не найдена
+            return (0, 0);
         }
+
+        public async Task<(int playerId, int wallet)> SavePlayer(string nickname, string password, CancellationToken cancellationToken)
+        {
+            await _dbConnection.OpenAsync(cancellationToken);
+            try
+            {
+                if (nickname != null && password != null)
+                {
+                    const string sqlQuery = "INSERT INTO players (nickname, password) VALUES (@nickname, @password) returning player_id, wallet";
+                    var cmd = new NpgsqlCommand(sqlQuery, _dbConnection);
+                    cmd.Parameters.AddWithValue("nickname", nickname);
+                    cmd.Parameters.AddWithValue("password", password);
+                    var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+                    if (reader.HasRows && await reader.ReadAsync(cancellationToken))
+                    {
+                        int playerId = reader.GetInt32(0);
+                        int wallet = reader.GetInt32(1);
+                        return (playerId, wallet);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
+            finally
+            {
+                await _dbConnection.CloseAsync();
+            }
+            return (0, 0);
+        }
+
 
     }
 }

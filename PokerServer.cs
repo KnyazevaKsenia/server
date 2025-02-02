@@ -1,25 +1,29 @@
-﻿using System.Net;
+﻿using System.Linq.Expressions;
+using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Threading;
 using static OmahaPokerServer.ProtocolServices.OmahaPackageHelper;
 
 namespace OmahaPokerServer
 {
     public class PokerServer
     {
-        private readonly Socket _socket;
-        private const int MaxTimeout = 5 * 60 * 1000;
-        private readonly Dictionary<Socket, int> _clients = new();
-        private readonly PokerDbContext _dbContext = new PokerDbContext();
-        private readonly List<PokerSession> sessions = new List<PokerSession>();
-
+        protected readonly Socket _socket;
+        protected const int MaxTimeout = 5 * 60 * 1000;
+        protected readonly Dictionary<Socket, (int,int)> _clients = new();
+        protected readonly PokerDbContext _dbContext = new PokerDbContext();
+        protected readonly List<PokerSession> sessions = new List<PokerSession>();
+        int currentPort {  get; set; }
         public PokerServer(IPAddress address, int port)
         {
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             _socket.Bind(new IPEndPoint(address, port));
+            currentPort = port;
         }
 
-        public async Task StartAsync()
+        public virtual async Task StartAsync()
         {
             try
             {
@@ -37,7 +41,7 @@ namespace OmahaPokerServer
                     });
 
                     var connectionSocket = await _socket.AcceptAsync(cancellationToken.Token);
-                    _clients.Add(connectionSocket, 0);
+                    _clients.Add(connectionSocket, (0, 0));
                     var innerCancellationToken = new CancellationTokenSource();
                     _ = Task.Run(
                         async () =>
@@ -55,12 +59,12 @@ namespace OmahaPokerServer
                 StopAsync();
             }
         }
-        private void StopAsync()
+        protected void StopAsync()
         {
             _socket.Close();
         }
 
-        private async Task ProcessSocketConnection(Socket socket, CancellationTokenSource cancellationToken)
+        protected async Task ProcessSocketConnection(Socket socket, CancellationTokenSource cancellationToken)
         {
             try
             {
@@ -101,7 +105,24 @@ namespace OmahaPokerServer
                         if (IsRegist(processing_buffer))
                         {
                             var result = await RegistUser(processing_buffer, recievedProcessingLength, cancellationToken);
-                            if (result == 0)
+                            if (result == (0, 0))
+                            {
+                                var badRequestContent = Encoding.UTF8.GetBytes("Wrong data");
+                                var package = CreatePackage(badRequestContent, Enums.Commands.Regist, Enums.QueryType.Response, Enums.StatusName.Failed);
+                                await SendResponseToClientAsync(socket, package, cancellationToken.Token);
+                            }
+                            else
+                            {
+                                _clients[socket] = result;
+                                var successRequestContent = Encoding.UTF8.GetBytes($"You have registered, your id:{result.Item1}, your wallet:{result.Item2}");
+                                var package = CreatePackage(successRequestContent, Enums.Commands.Regist, Enums.QueryType.Response, Enums.StatusName.Success);
+                                await SendResponseToClientAsync(socket, package, cancellationToken.Token);
+                            }
+                        }
+                        if (IsLogin(processing_buffer))
+                        {
+                            (int, int) result = await LoginUser(processing_buffer, recievedLength, cancellationToken);
+                            if (result == (0, 0))
                             {
                                 var badRequestContent = Encoding.UTF8.GetBytes("Wrong data");
                                 var package = CreatePackage(badRequestContent, Enums.Commands.None, Enums.QueryType.Response, Enums.StatusName.Failed);
@@ -110,23 +131,38 @@ namespace OmahaPokerServer
                             else
                             {
                                 _clients[socket] = result;
-                                var successRequestContent = Encoding.UTF8.GetBytes($"You have registered, your id:{result}");
-                                var package = CreatePackage(successRequestContent, Enums.Commands.None, Enums.QueryType.Response, Enums.StatusName.Success);
+                                var successRequestContent = Encoding.UTF8.GetBytes($"You have logged in, your id:{result.Item1}, your wallet:{result.Item2}");
+                                var package = CreatePackage(successRequestContent, Enums.Commands.Login, Enums.QueryType.Response, Enums.StatusName.Success);
                                 await SendResponseToClientAsync(socket, package, cancellationToken.Token);
                             }
                         }
-                      
-                        if (IsLogin(processing_buffer))
-                        {
-                            
-                        }
                         if (IsCreateSession(processing_buffer))
                         {
-                            // Обработка создания сессии
+                            var session = CreateSession(processing_buffer, recievedLength, cancellationToken.Token);
+                            if (session != null) 
+                            {
+                                sessions.Add(session);
+                                var sessionServer = new PokerServerSession(session.Address, session.port, session.NumberOfPlayers);
+                                //запуск сервера для игры 
+                                sessionServer.StartAsync();
+                                var successRequestContent = Encoding.UTF8.GetBytes($"You have created session with name: {session.Name}, with bank: {session.Bank}, with {session.NumberOfPlayers} players");
+                                var package = CreatePackage(successRequestContent, Enums.Commands.CreateSession, Enums.QueryType.Response, Enums.StatusName.Success);
+                                await SendResponseToClientAsync(socket, package, cancellationToken.Token);
+                            }
+                            else
+                            {
+                                var successRequestContent = Encoding.UTF8.GetBytes($"Wrong data for creating session");
+                                var package = CreatePackage(successRequestContent, Enums.Commands.CreateSession, Enums.QueryType.Response, Enums.StatusName.Failed);
+                                await SendResponseToClientAsync(socket, package, cancellationToken.Token);
+                            }
+                        }
+                        if (IsGetSessions(processing_buffer))
+                        {
+
                         }
                         if (IsJoinTheGame(processing_buffer))
                         {
-                            // Обработка присоединения к игре
+                            
                         }
                     }
                     else
@@ -141,8 +177,59 @@ namespace OmahaPokerServer
                 Console.WriteLine($"Ошибка при обработке соединения: {ex.Message}");
             }
         }
+        private PokerSession CreateSession(byte[] buffer, int length, CancellationToken cancellationToken)
+        {
+            var contentString = Encoding.UTF8.GetString(GetContent(buffer, length));
+            string[] parts = contentString.Split('&');
+            string name = parts[0];
+            try
+            {
+                int playersAmount = int.Parse(parts[1]);
+                int bank = int.Parse(parts[2]);
+                currentPort += 1;
+                if (string.IsNullOrEmpty(name) && playersAmount != 0 && bank != 0)
+                {
+                    var session = new PokerSession(name, playersAmount, bank, new IPAddress(new byte[] { 127, 0, 0, 1 }), currentPort);
+                    return session;
+                }
+                else
+                {
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.ToString());
+                return null;
+            }
+        }
 
-        public async Task<int> RegistUser(byte[] buffer, int contentLength, CancellationTokenSource token)
+        private async Task<(int, int)> LoginUser(byte[] buffer, int contentLength, CancellationTokenSource token)
+        {
+            var contentString = Encoding.UTF8.GetString(GetContent(buffer, contentLength));
+            string[] parts = contentString.Split('&');
+            if (parts.Length == 2)
+            {
+                string nickname = parts[0];
+                string password = parts[1];
+                var user = new UserRegistModel(nickname, password);
+                var result = await _dbContext.SavePlayer(nickname, password, token.Token);
+                if (result != (0, 0))
+                {
+                    return (result.playerId, result.wallet);
+                }
+                else
+                {
+                    return (0,0);
+                }
+            }
+            else
+            {
+                return (0, 0);
+            }
+        }
+
+        private async Task<(int, int)> RegistUser(byte[] buffer, int contentLength, CancellationTokenSource token)
         {
             var contentString = Encoding.UTF8.GetString(GetContent(buffer, contentLength));
             string[] parts = contentString.Split('&');
@@ -156,25 +243,24 @@ namespace OmahaPokerServer
                 if (userValidationResult.IsValid)
                 {
                     var savingResult = await _dbContext.SavePlayer(nickname, password, token.Token);
-                    return savingResult;
+                    return (savingResult.playerId, savingResult.wallet);
                 }
                 else
                 {
-                    return 0;
+                    return (0,0);
                 }
             }
             else
             {
-                return 0;
+                return (0,0);
             }
         }
 
-        private async Task SendResponseToClientAsync(Socket clientSocket, byte[] buffer, CancellationToken cancellationToken)
+        protected async Task SendResponseToClientAsync(Socket clientSocket, byte[] buffer, CancellationToken cancellationToken)
         {
             try
             {
                 await clientSocket.SendAsync(buffer, SocketFlags.None, cancellationToken);
-                Console.WriteLine("Сообщение отправлено клиенту.");
             }
             catch (Exception ex)
             {

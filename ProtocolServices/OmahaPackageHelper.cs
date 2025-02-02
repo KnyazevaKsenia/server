@@ -44,6 +44,8 @@ namespace OmahaPokerServer.ProtocolServices
         public static bool IsResponse(byte[] buffer) =>
             buffer[Query] is (byte)QueryType.Response;
 
+        public static bool IsGetSessions(byte[] buffer) =>
+            buffer[Command] is (byte)Commands.GetSessions;
         public static bool IsConnect(byte[] buffer) =>
             buffer[Command] is (byte)Commands.Connect;
         public static bool IsRegist(byte[] buffer) =>

@@ -13,6 +13,7 @@ namespace OmahaPokerServer.Enums
         Login = 0x4C, //L
         CreateSession = 0x43,//C
         JoinTheGame = 0x4A, //J
+        GetSessions = 0x47, //G
         None = 0x00, //null
     }
 }
